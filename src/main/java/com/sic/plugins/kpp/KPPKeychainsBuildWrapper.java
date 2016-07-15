@@ -26,34 +26,35 @@ package com.sic.plugins.kpp;
 
 import com.sic.plugins.kpp.model.KPPKeychain;
 import com.sic.plugins.kpp.model.KPPKeychainCertificatePair;
+import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
-import hudson.model.AbstractBuild;
-import hudson.model.AbstractProject;
-import hudson.model.BuildListener;
-import hudson.model.Hudson;
+import hudson.model.*;
 import hudson.tasks.BuildWrapper;
 import hudson.tasks.BuildWrapperDescriptor;
 import java.io.File;
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import jenkins.tasks.SimpleBuildWrapper;
 import org.kohsuke.stapler.DataBoundConstructor;
 
 /**
  * Build wrapper for keychains
  * @author mb
  */
-public class KPPKeychainsBuildWrapper extends BuildWrapper {
+public class KPPKeychainsBuildWrapper extends SimpleBuildWrapper implements Serializable {
 
     private List<KPPKeychainCertificatePair> keychainCertificatePairs = new ArrayList<KPPKeychainCertificatePair>();
     private boolean deleteKeychainsAfterBuild;
     private boolean overwriteExistingKeychains;
     private transient List<FilePath>copiedKeychains;
-    
+
     /**
      * Constructor
      * @param keychainCertificatePairs list of keychain certificate pairs
@@ -66,7 +67,7 @@ public class KPPKeychainsBuildWrapper extends BuildWrapper {
         this.deleteKeychainsAfterBuild = deleteKeychainsAfterBuild;
         this.overwriteExistingKeychains = overwriteExistingKeychains;
     }
-    
+
     /**
      * Get if the keychain can be deleted after the build.
      * @return true can be deleted, otherwise false
@@ -74,7 +75,7 @@ public class KPPKeychainsBuildWrapper extends BuildWrapper {
     public boolean getDeleteKeychainsAfterBuild() {
         return deleteKeychainsAfterBuild;
     }
-    
+
     /**
      * Get if a current existing keychain with the same filename can be overwritten.
      * @return true can be overwritten, otherwise false
@@ -82,7 +83,7 @@ public class KPPKeychainsBuildWrapper extends BuildWrapper {
     public boolean getOverwriteExistingKeychains() {
         return overwriteExistingKeychains;
     }
-    
+
     /**
      * Get all keychain certificate pairs configured for this build job.
      * @return list of keychain certificate pairs
@@ -90,22 +91,23 @@ public class KPPKeychainsBuildWrapper extends BuildWrapper {
     public List<KPPKeychainCertificatePair> getKeychainCertificatePairs() {
         return keychainCertificatePairs;
     }
-    
+
     @Override
-    public Environment setUp(AbstractBuild build, Launcher launcher, BuildListener listener) throws IOException, InterruptedException {
-        copyKeychainsToWorkspace(build);
-        return new EnvironmentImpl(keychainCertificatePairs);
+    public void setUp(Context context, Run<?, ?> run, FilePath filePath, Launcher launcher, TaskListener taskListener, EnvVars envVars) throws IOException, InterruptedException {
+        copyKeychainsToWorkspace(filePath);
+
+        Environment env = new EnvironmentImpl(keychainCertificatePairs, filePath);
+        env.buildEnvVars(context.getEnv());
+        context.setDisposer(new KPPKeychainsDisposer());
     }
-    
+
     /**
      * Copy the keychains configured for this build job to the workspace of the job.
-     * @param build the current build
+     * @param projectWorkspace the current build
      * @throws IOException
-     * @throws InterruptedException 
+     * @throws InterruptedException
      */
-    private void copyKeychainsToWorkspace(AbstractBuild build) throws IOException, InterruptedException {
-        FilePath projectWorkspace = build.getWorkspace();
-
+    private void copyKeychainsToWorkspace(FilePath projectWorkspace) throws IOException, InterruptedException {
         Hudson hudson = Hudson.getInstance();
         FilePath hudsonRoot = hudson.getRootPath();
 
@@ -124,18 +126,18 @@ public class KPPKeychainsBuildWrapper extends BuildWrapper {
             }
         }
     }
-    
+
     @Override
     public DescriptorImpl getDescriptor() {
         return (DescriptorImpl) super.getDescriptor();
     }
-    
+
     /**
      * Descriptor of the {@link KPPKeychainBuildWrapper}.
      */
     @Extension
     public static final class DescriptorImpl extends BuildWrapperDescriptor {
-        
+
         @Override
         public boolean isApplicable(AbstractProject<?, ?> ap) {
             return true;
@@ -146,22 +148,40 @@ public class KPPKeychainsBuildWrapper extends BuildWrapper {
             return Messages.KPPKeychainsBuildWrapper_DisplayName();
         }
     }
-    
+
+    /**
+     * Disposer class for cleaning up copied keychains
+     */
+    public class KPPKeychainsDisposer extends Disposer
+    {
+        @Override
+        public void tearDown(Run<?, ?> run, FilePath filePath, Launcher launcher, TaskListener taskListener) throws IOException, InterruptedException {
+            if (deleteKeychainsAfterBuild) {
+                for (FilePath keychainPath : copiedKeychains) {
+                    keychainPath.delete();
+                }
+            }
+        }
+    }
+
     /**
      * Environment implementation that adds additional variables to the build.
+     * TODO: Does not need extend Environment anymore.
      */
     private class EnvironmentImpl extends Environment {
-        
+        private FilePath workspace;
+
         private final List<KPPKeychainCertificatePair> keychainCertificatePairs;
-        
+
         /**
          * Constructor
          * @param keychainCertificatePairs list of keychain certificate pairs configured for this build job
          */
-        public EnvironmentImpl(List<KPPKeychainCertificatePair> keychainCertificatePairs) {
+        public EnvironmentImpl(List<KPPKeychainCertificatePair> keychainCertificatePairs, FilePath workspace) {
             this.keychainCertificatePairs = keychainCertificatePairs;
+            this.workspace = workspace;
         }
-        
+
         /**
          * Adds additional variables to the build environment.
          * @param env current environment
@@ -176,7 +196,7 @@ public class KPPKeychainsBuildWrapper extends BuildWrapper {
                     String password = keychain.getPassword();
                     String codeSigningIdentity = pair.getCodeSigningIdentity();
                     if (fileName!=null && fileName.length()!=0) {
-                        String keychainPath = String.format("%s%s%s", env.get("WORKSPACE"), File.separator, fileName);
+                        String keychainPath = String.format("%s%s%s", workspace, File.separator, fileName);
                         map.put(pair.getKeychainVariableName(), keychainPath);
                     }
                     if (password!=null && password.length()!=0)
@@ -187,22 +207,10 @@ public class KPPKeychainsBuildWrapper extends BuildWrapper {
             }
             return map;
         }
-        
+
         @Override
         public void buildEnvVars(Map<String, String> env) {
             env.putAll(getEnvMap(env));
-	}
-        
-        @Override
-        public boolean tearDown(AbstractBuild build, BuildListener listener)
-                throws IOException, InterruptedException {
-            if (deleteKeychainsAfterBuild) {
-                for (FilePath filePath : copiedKeychains) {
-                    filePath.delete();
-                }
-            }
-            return true;
         }
-        
     }
 }
